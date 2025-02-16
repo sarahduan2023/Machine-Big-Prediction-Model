@@ -1,0 +1,33 @@
+*Training parallelism
+
+The main bottleneck for training very large neural network models is the strong need for large amounts of GPU memory, far beyond what a single GPU machine can carry. In addition to model weights (e.g., tens of billions of floating point numbers), storing intermediate computation outputs (e.g., gradients and optimizer states, such as momentum and variance in Adam) is often more expensive. Furthermore, training large models is often paired with large training corpora, so a single process can take a long time.
+
+Therefore, parallelism is necessary. Parallelism can occur in different dimensions, including data, model architecture, and tensor operations.
+
+*Data Parallelism
+
+*The simplest approach to data parallelism (DP) is to replicate the same model weights to multiple workers and assign a small portion of the data to each worker to process simultaneously.
+
+Naive DP does not work well if the model size is larger than the memory of a single GPU node. When the model is too large to fit on a single machine, methods such as *GeePS* ([Cui et al., 2016](https://www.pdl.cmu.edu/PDL-FTP/CloudComputing/GeePS-cui-eurosys16.pdf)) offload temporarily unused parameters back to the CPU to use limited GPU memory. Data exchange transfers should be done in the backend and should not interfere with training computations.
+
+At the end of each mini-batch, workers need to synchronize gradients or weights to avoid staleness. There are two main synchronization methods, both with distinct advantages and disadvantages.
+1. *Asynchronous parallel (ASP)*: Every GPU worker processes the data asynchronously, no waiting or stalling. However, it can easily lead to stale weights being used and thus lower the statistical learning efficiency. Even though it increases the computation time, it may not speed up training time to convergence.
+2. *Bulk synchronous parallels (BSP)*: Workers sync data at the end of every minibatch. It prevents model weights staleness and good learning efficiency but each machine has to halt and wait for others to send gradients.
+
+Somewhere in the middle is to synchronize gradients globally once every iterations (). This feature is called “gradient accumulation” in Distribution Data Parallel ([DDP](https://pytorch.org/tutorials/intermediate/ddp_tutorial.html)) since Pytorch v1.5 ([Li et al. 2021](https://arxiv.org/abs/2006.15704)). Bucketing gradients avoid immediate `AllReduce` operations but instead buckets multiple gradients into one `AllReduce` to improve throughput. Computation and communication scheduling optimization can be made based on the computation graph.
+scheduling optimization can be made based on the computation graph.
+
+https://lilianweng.github.io/posts/2021-09-25-train-large/pytorch-ddp.png
+
+Fig. 1. Pseudo code for Pytorch DDP. (Image source: [Li et al. 2021](https://arxiv.org/abs/2006.15704))
+
+*Model Parallelism
+
+**Model parallelism (MP)** aims to solve the case when the model weights cannot fit into a single node. The computation and model parameters are partitioned across multiple machines. Different from data parallelism where each worker hosts a full copy of the entire model, MP only allocates a fraction of model parameters on one worker and thus both the memory usage and the computation are reduced.
+
+Since deep neural networks usually contain a stack of vertical layers, it feels straightforward to split a large model by layer, where a small consecutive set of layers are grouped into one partition on one worker. However, a naive implementation for running every data batch through multiple such workers with sequential dependency leads to big bubbles of waiting time and severe under-utilization of computation resources.
+utilization of computation resources.
+
+!https://lilianweng.github.io/posts/2021-09-25-train-large/naive-data-parallelism.png
+
+Fig. 2. A naive model parallelism setup where the model is vertically split into 4 partitions. Data is processed by one worker at a time due to sequential dependency, leading to large “bubbles” of idle time. (Image source: [Huang et al. 2019](https://arxiv.org/abs/1811.06965))
